@@ -1,0 +1,2 @@
+id,username,loginid,password,fname,lname,gender,dob,mobileno,addr,notes,image,created_on,updated_on,role_id,last_login,delete_status
+1,admin,admin@gmail.com,aa7f019c326413d5b8bcad4314228bcd33ef557f5d81c7cc977f7728156f4357,admin,admin,Male,2018-11-26,9423979339,"<p>Maharashtra, India</p>",<p>admin panel</p>,profile.jpg,2018-04-30,2019-10-15,1,0000-00-00,0
