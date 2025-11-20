@@ -748,8 +748,11 @@ with tab_ml:
     if df_filtered.empty:
         st.info("No data for the selected filters.")
     else:
-        # 1) FUTURE APPOINTMENT VOLUME FORECAST (simple regression)
-        st.markdown("### 1️⃣ Future appointment volume forecast")
+
+        # ---------------------------------------------------------
+        # 1️⃣ FUTURE APPOINTMENT FORECAST (Extended to Next Year)
+        # ---------------------------------------------------------
+        st.markdown("### 1️⃣ Future appointment forecast (Advanced)")
 
         daily = (
             df_filtered.groupby("date")["appointmentid"]
@@ -758,8 +761,8 @@ with tab_ml:
             .sort_values("date")
         )
 
-        if daily.shape[0] < 5:
-            st.info("Not enough historical days for a meaningful forecast (need at least 5). Showing history only.")
+        if daily.shape[0] < 10:
+            st.info("Need at least 10 days of data for forecasting.")
             fig_hist = px.line(
                 daily,
                 x="date",
@@ -769,214 +772,223 @@ with tab_ml:
             )
             fig_hist.update_layout(template="plotly_dark")
             st.plotly_chart(fig_hist, use_container_width=True)
+
         else:
-            # Simple linear trend model without external libraries
+            # Forecast options
+            st.subheader("Forecast Settings")
+
+            forecast_mode = st.selectbox(
+                "Forecast Duration Mode",
+                ["Days", "Months", "Years"]
+            )
+
+            if forecast_mode == "Days":
+                horizon = st.slider("Forecast next N days", 7, 365, 30)
+            elif forecast_mode == "Months":
+                horizon = st.slider("Forecast next N months", 1, 24, 6) * 30
+            else:
+                horizon = st.slider("Forecast next N years", 1, 5, 1) * 365
+
+            model_type = st.radio(
+                "Trend Model",
+                ["Linear", "Quadratic", "Exponential"],
+                horizontal=True
+            )
+
+            # Prepare data
             daily["day_index"] = range(len(daily))
             x = daily["day_index"].values
             y = daily["appointments"].values
-            coeffs = np.polyfit(x, y, deg=1)
-            a, b = coeffs  # y = a*x + b
 
-            horizon = st.slider(
-                "Forecast horizon (days)",
-                min_value=7,
-                max_value=30,
-                value=14
-            )
+            # MODEL SELECTION
+            if model_type == "Linear":
+                coeffs = np.polyfit(x, y, 1)
+                pred_fn = lambda t: coeffs[0] * t + coeffs[1]
 
+            elif model_type == "Quadratic":
+                coeffs = np.polyfit(x, y, 2)
+                pred_fn = lambda t: coeffs[0] * (t ** 2) + coeffs[1] * t + coeffs[2]
+
+            else:  # Exponential
+                y_adj = np.where(y <= 0, 1, y)
+                coeffs = np.polyfit(x, np.log(y_adj), 1)
+                pred_fn = lambda t: np.exp(coeffs[0] * t + coeffs[1])
+
+            # Build future prediction range
             last_idx = daily["day_index"].max()
             future_idx = np.arange(last_idx + 1, last_idx + 1 + horizon)
-            future_dates = [daily["date"].min() + timedelta(days=int(i)) for i in future_idx]
-            future_pred = a * future_idx + b
-            future_pred = np.maximum(future_pred, 0)  # no negative counts
 
-            hist_plot = daily[["date", "appointments"]].copy()
-            hist_plot["type"] = "Actual"
+            # Forecast must begin AFTER the last filtered date
+            last_date = daily["date"].max()
+            future_dates = [last_date + timedelta(days=int(i)) for i in range(1, horizon + 1)]
 
-            future_plot = pd.DataFrame({
+
+            # Forecast values
+            future_pred = pred_fn(future_idx)
+            future_pred = np.maximum(future_pred, 0)
+
+            # Combine data
+            hist = daily[["date", "appointments"]].copy()
+            hist["type"] = "Actual"
+
+            future = pd.DataFrame({
                 "date": future_dates,
                 "appointments": future_pred,
                 "type": "Forecast"
             })
 
-            combined = pd.concat([hist_plot, future_plot], ignore_index=True)
+            combined = pd.concat([hist, future], ignore_index=True)
 
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                fig_fore_line = px.line(
+            # Charts
+            colF1, colF2 = st.columns(2)
+
+            with colF1:
+                fig_line = px.line(
                     combined,
                     x="date",
                     y="appointments",
                     color="type",
                     markers=True,
-                    title="Daily appointments – history & forecast"
+                    title="History + Future Forecast"
                 )
-                fig_fore_line.update_layout(
-                    template="plotly_dark",
-                    xaxis_title="Date",
-                    yaxis_title="Appointments"
-                )
-                st.plotly_chart(fig_fore_line, use_container_width=True)
+                fig_line.update_layout(template="plotly_dark")
+                st.plotly_chart(fig_line, use_container_width=True)
 
-            with col_f2:
-                fig_fore_bar = px.bar(
-                    future_plot,
+            with colF2:
+                fig_bar = px.bar(
+                    future,
                     x="date",
                     y="appointments",
-                    title="Forecasted daily appointments (future only)"
+                    title="Forecasted Future Appointments"
                 )
-                fig_fore_bar.update_layout(
-                    template="plotly_dark",
-                    xaxis_title="Date",
-                    yaxis_title="Forecasted appointments"
-                )
-                st.plotly_chart(fig_fore_bar, use_container_width=True)
+                fig_bar.update_layout(template="plotly_dark")
+                st.plotly_chart(fig_bar, use_container_width=True)
 
-            # Simple statistic: next 7 days
-            next_7_total = future_plot.head(7)["appointments"].sum()
-            st.markdown(
-                f"**Projected appointments for next 7 days:** `{next_7_total:.0f}` (based on linear trend)"
-            )
+            st.success(f"Forecast extends up to: **{future_dates[-1]}**")
 
         st.markdown("---")
 
-        # 2) HEATMAP & CHARTS FOR PREDICTIVE FACTORS
+        # ---------------------------------------------------------
+        # 2️⃣ Predictive Patterns – Season / Weekday / Department
+        # ---------------------------------------------------------
         st.markdown("### 2️⃣ Predictive patterns – season, weekday, department")
 
-        if not df_filtered.empty:
-            # Season x Department heatmap
-            if "season" in df_filtered.columns and "departmentname" in df_filtered.columns:
-                cross = (
-                    df_filtered
-                    .groupby(["season", "departmentname"])["appointmentid"]
-                    .count()
-                    .reset_index(name="appointments")
-                )
-                if not cross.empty:
-                    pivot_sd = cross.pivot(
-                        index="season", columns="departmentname", values="appointments"
-                    ).fillna(0)
-                    fig_sd = go.Figure(
-                        data=go.Heatmap(
-                            z=pivot_sd.values,
-                            x=pivot_sd.columns,
-                            y=pivot_sd.index,
-                            coloraxis="coloraxis"
-                        )
-                    )
-                    fig_sd.update_layout(
-                        title="Heatmap – Season vs Department (appointments)",
-                        xaxis_title="Department",
-                        yaxis_title="Season",
-                        coloraxis_colorscale="Blues",
-                        template="plotly_dark",
-                        margin=dict(l=10, r=10, t=40, b=80)
-                    )
-                    st.plotly_chart(fig_sd, use_container_width=True)
+        if "season" in df_filtered.columns and "departmentname" in df_filtered.columns:
+            cross = (
+                df_filtered.groupby(["season", "departmentname"])["appointmentid"]
+                .count()
+                .reset_index(name="appointments")
+            )
 
-            col_pf1, col_pf2 = st.columns(2)
-
-            # Bar: season-wise volume
-            with col_pf1:
-                season_counts = (
-                    df_filtered.groupby("season")["appointmentid"]
-                    .count()
-                    .reset_index(name="appointments")
+            if not cross.empty:
+                pivot_sd = cross.pivot(
+                    index="season", columns="departmentname", values="appointments"
+                ).fillna(0)
+                fig_sd = go.Figure(
+                    data=go.Heatmap(
+                        z=pivot_sd.values,
+                        x=pivot_sd.columns,
+                        y=pivot_sd.index,
+                        coloraxis="coloraxis"
+                    )
                 )
-                if not season_counts.empty:
-                    fig_season_bar = px.bar(
-                        season_counts,
-                        x="season",
-                        y="appointments",
-                        title="Season-wise appointment volume",
-                    )
-                    fig_season_bar.update_layout(
-                        template="plotly_dark",
-                        xaxis_title="Season",
-                        yaxis_title="Appointments"
-                    )
-                    st.plotly_chart(fig_season_bar, use_container_width=True)
-
-            # Pie: weekday share
-            with col_pf2:
-                weekday_counts = (
-                    df_filtered.groupby("day_name")["appointmentid"]
-                    .count()
-                    .reset_index(name="appointments")
+                fig_sd.update_layout(
+                    title="Heatmap – Season vs Department",
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=40, b=40),
+                    coloraxis_colorscale="Blues"
                 )
-                if not weekday_counts.empty:
-                    # reorder weekdays
-                    weekday_order = [
-                        "Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"
-                    ]
-                    weekday_counts["day_name"] = pd.Categorical(
-                        weekday_counts["day_name"], categories=weekday_order, ordered=True
-                    )
-                    weekday_counts = weekday_counts.sort_values("day_name")
-                    fig_weekday_pie = px.pie(
-                        weekday_counts,
-                        names="day_name",
-                        values="appointments",
-                        title="Weekday share of appointments",
-                    )
-                    fig_weekday_pie.update_layout(template="plotly_dark")
-                    st.plotly_chart(fig_weekday_pie, use_container_width=True)
+                st.plotly_chart(fig_sd, use_container_width=True)
+
+        col_pf1, col_pf2 = st.columns(2)
+
+        with col_pf1:
+            season_counts = (
+                df_filtered.groupby("season")["appointmentid"]
+                .count()
+                .reset_index(name="appointments")
+            )
+            if not season_counts.empty:
+                fig_s = px.bar(
+                    season_counts,
+                    x="season",
+                    y="appointments",
+                    title="Season-wise appointment volume"
+                )
+                fig_s.update_layout(template="plotly_dark")
+                st.plotly_chart(fig_s, use_container_width=True)
+
+        with col_pf2:
+            weekday_counts = (
+                df_filtered.groupby("day_name")["appointmentid"]
+                .count()
+                .reset_index(name="appointments")
+            )
+            if not weekday_counts.empty:
+                weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                weekday_counts["day_name"] = pd.Categorical(
+                    weekday_counts["day_name"], categories=weekday_order, ordered=True
+                )
+                weekday_counts = weekday_counts.sort_values("day_name")
+                fig_pie = px.pie(
+                    weekday_counts,
+                    names="day_name",
+                    values="appointments",
+                    title="Weekday share"
+                )
+                fig_pie.update_layout(template="plotly_dark")
+                st.plotly_chart(fig_pie, use_container_width=True)
 
         st.markdown("---")
 
-        # 3) Bed demand projection (very simple ML-style estimate)
-        st.markdown("### 3️⃣ Bed demand projection (simple estimate)")
+        # ---------------------------------------------------------
+        # 3️⃣ Bed Demand Estimate
+        # ---------------------------------------------------------
+        # ---------------------------------------------------------
+# 3️⃣ Bed Demand Projection (Only Predicted Demand)
+# ---------------------------------------------------------
+st.markdown("### 3️⃣ Bed demand projection (trend-based estimate)")
 
-        if rooms_df is not None and "noofbeds" in rooms_df.columns:
-            total_beds = int(rooms_df["noofbeds"].fillna(0).sum())
-            # Use recent 7 days from df_filtered (or full df if less)
-            if not df_filtered.empty:
-                recent_days = (
-                    df_filtered
-                    .groupby("date")["appointmentid"]
-                    .count()
-                    .reset_index(name="appointments")
-                    .sort_values("date", ascending=False)
-                    .head(7)
-                )
-                avg_recent = recent_days["appointments"].mean()
+if not df_filtered.empty:
+    # Get last 7 days
+    recent_days = (
+        df_filtered
+        .groupby("date")["appointmentid"]
+        .count()
+        .reset_index(name="appointments")
+        .sort_values("date", ascending=False)
+        .head(7)
+    )
 
-                # simple rule: assume one bed per appointment as an upper bound
-                projected_bed_demand = min(total_beds, avg_recent)
-                fig_bed = go.Figure()
-                fig_bed.add_trace(
-                    go.Bar(
-                        x=["Total Beds"],
-                        y=[total_beds],
-                        name="Total Beds"
-                    )
-                )
-                fig_bed.add_trace(
-                    go.Bar(
-                        x=["Projected Demand"],
-                        y=[projected_bed_demand],
-                        name="Projected Bed Demand (next 7 days avg)"
-                    )
-                )
-                fig_bed.update_layout(
-                    barmode="group",
-                    title="Projected bed demand vs total capacity",
-                    template="plotly_dark",
-                    yaxis_title="Beds"
-                )
-                st.plotly_chart(fig_bed, use_container_width=True)
+    avg_recent = recent_days["appointments"].mean()
+    projected_bed_demand = round(avg_recent, 1)
 
-                st.markdown(
-                    f"- **Total beds:** `{total_beds}`  \n"
-                    f"- **Avg appointments (last 7 days in filter):** `{avg_recent:.1f}`  \n"
-                    f"- **Projected peak demand:** `{projected_bed_demand:.1f}` beds"
-                )
-            else:
-                st.info("No filtered appointments to compute bed demand.")
-        else:
-            st.info("Room / bed metadata not found in workbook.")
+    # Plot single bar (projected demand only)
+    fig_bed = go.Figure()
+    fig_bed.add_trace(
+        go.Bar(
+            x=["Projected Bed Demand"],
+            y=[projected_bed_demand],
+            name="Projected Demand"
+        )
+    )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    fig_bed.update_layout(
+        title="Projected bed demand (next 7 days average)",
+        template="plotly_dark",
+        yaxis_title="Bed Demand (Estimated)"
+    )
+
+    st.plotly_chart(fig_bed, use_container_width=True)
+
+    st.markdown(
+        f"- **Average appointments (last 7 days):** `{avg_recent:.1f}`  \n"
+        f"- **Estimated bed demand (next 7 days):** `{projected_bed_demand}` beds"
+    )
+else:
+    st.info("No sufficient data to compute bed demand.")
+
+
 
 # ---------------------------------------------------------
 # Raw data tab
